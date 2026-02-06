@@ -7,7 +7,7 @@ from torch import Tensor
 import torch.distributed as dist
 from xfuser.core.distributed import (
     init_distributed_environment,
-    get_classifier_free_guidance_world_size, 
+    get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -16,9 +16,11 @@ from xfuser.core.distributed import (
 )
 
 if os.getenv("TORCHELASTIC_RUN_ID") is not None:
-    dist.init_process_group("nccl")
+    # Only initialize if not already initialized (e.g., by accelerate)
+    if not dist.is_initialized():
+        dist.init_process_group("nccl")
     init_distributed_environment(
-        rank=dist.get_rank(), 
+        rank=dist.get_rank(),
         world_size=dist.get_world_size()
     )
 
@@ -36,10 +38,10 @@ def parallel_transformer(pipe):
         llm_embedding: Tensor,
         t_vec: Tensor,
         mask: Tensor,
-    ):  
+    ):
         txt, y = self.connector(
             llm_embedding, t_vec, mask
-        )   # 
+        )   #
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
@@ -57,13 +59,13 @@ def parallel_transformer(pipe):
                 y, get_classifier_free_guidance_world_size(), dim=0
             )[get_classifier_free_guidance_rank()]
         # ---------------------------------------------------------------------
-        
-        img = self.img_in(img) 
-        vec = self.time_in(self.timestep_embedding(timesteps, 256)) 
+
+        img = self.img_in(img)
+        vec = self.time_in(self.timestep_embedding(timesteps, 256))
 
         vec = vec + self.vector_in(y)
 
-        txt = self.txt_in(txt) 
+        txt = self.txt_in(txt)
 
 
         # ---------------------------------------------------------------------
@@ -98,14 +100,14 @@ def parallel_transformer(pipe):
         )[get_sequence_parallel_rank()]
         # ---------------------------------------------------------------------
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)  
-        pe = self.pe_embedder(ids) 
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
 
         if not self.blocks_to_swap:
             for block in self.double_blocks:
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-            img = torch.cat((txt, img), 1) 
+            img = torch.cat((txt, img), 1)
             for block in self.single_blocks:
                 img = block(img, vec=vec, pe=pe)
         else:
@@ -126,13 +128,13 @@ def parallel_transformer(pipe):
             img = img.to(self.device)
             vec = vec.to(self.device)
 
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels) 
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 
         # ---------------------------------------------------------------------
         img = get_sp_group().all_gather(img, dim=-2)
         img = get_cfg_group().all_gather(img, dim=0)
         # ---------------------------------------------------------------------
-        
+
         return img
 
     new_forward = new_forward.__get__(transformer)
@@ -155,21 +157,21 @@ def teacache_transformer(pipe):
         t_vec: Tensor,
         mask: Tensor,
         idx = None,
-    ): 
+    ):
         txt, y = self.connector(
             llm_embedding, t_vec, mask
-        )   
+        )
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
-        img = self.img_in(img)  
-        vec = self.time_in(self.timestep_embedding(timesteps, 256)) 
+        img = self.img_in(img)
+        vec = self.time_in(self.timestep_embedding(timesteps, 256))
 
         vec = vec + self.vector_in(y)
 
-        txt = self.txt_in(txt)  
-        ids = torch.cat((txt_ids, img_ids), dim=1)  
-        pe = self.pe_embedder(ids) 
+        txt = self.txt_in(txt)
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
 
         # ---------------------- teacache ------------------------
         inp = img.clone()
@@ -191,10 +193,10 @@ def teacache_transformer(pipe):
             else:
                 should_calc = True
                 self.accumulated_rel_l1_distance = 0
-        self.previous_modulated_input = modulated_inp 
-        self.cnt += 1 
+        self.previous_modulated_input = modulated_inp
+        self.cnt += 1
         if self.cnt == self.num_steps:
-            self.cnt = 0           
+            self.cnt = 0
         # ---------------------- teacache ------------------------
 
         # ---------------------- teacache ------------------------
@@ -221,7 +223,7 @@ def teacache_transformer(pipe):
                     self.offloader_single.wait_for_block(block_idx)
                     img = block(img, vec=vec, pe=pe)
                     self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
-            
+
             img = img[:, txt.shape[1] :, ...]
             self.previous_residual = img - ori_img
         # ---------------------- teacache ------------------------
@@ -252,10 +254,10 @@ def parallel_teacache_transformer(pipe):
         t_vec: Tensor,
         mask: Tensor,
         idx = None,
-    ): 
+    ):
         txt, y = self.connector(
             llm_embedding, t_vec, mask
-        )  
+        )
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
@@ -273,14 +275,14 @@ def parallel_teacache_transformer(pipe):
                 y, get_classifier_free_guidance_world_size(), dim=0
             )[get_classifier_free_guidance_rank()]
         # ------------------------------ xDiT ---------------------------------------
-        
+
 
         img = self.img_in(img)
         vec = self.time_in(self.timestep_embedding(timesteps, 256))
 
         vec = vec + self.vector_in(y)
 
-        txt = self.txt_in(txt)  
+        txt = self.txt_in(txt)
 
         # ------------------------------ xDiT ---------------------------------------
         # img cfg_usp
@@ -314,8 +316,8 @@ def parallel_teacache_transformer(pipe):
         )[get_sequence_parallel_rank()]
         # ------------------------------ xDiT ---------------------------------------
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)  
-        pe = self.pe_embedder(ids) 
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
 
         # ---------------------- teacache ------------------------
         device = img.device
@@ -326,7 +328,7 @@ def parallel_teacache_transformer(pipe):
             dist.broadcast(tensor_accum, src=0)
             self.cnt = tensor_cnt.item()
             self.accumulated_rel_l1_distance = tensor_accum.item()
-        
+
         inp = img.clone()
         # vec_ = vec.clone()
         # img_mod1_, _ = self.double_blocks[0].img_mod(vec_)
@@ -342,12 +344,12 @@ def parallel_teacache_transformer(pipe):
             coefficients = [4.98651651e+02, -2.83781631e+02,  5.58554382e+01, -3.82021401e+00, 2.64230861e-01]
             rescale_func = np.poly1d(coefficients)
             self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
-            
+
             if dist.is_initialized():
                 tensor_accum = torch.tensor(self.accumulated_rel_l1_distance, device=device)
                 dist.broadcast(tensor_accum, src=0)
                 self.accumulated_rel_l1_distance = tensor_accum.item()
-            
+
             if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
                 should_calc = False
             else:
@@ -359,10 +361,10 @@ def parallel_teacache_transformer(pipe):
             dist.broadcast(should_calc_tensor, src=0)
         should_calc = should_calc_tensor.item()
 
-        self.previous_modulated_input = modulated_inp 
-        self.cnt += 1 
+        self.previous_modulated_input = modulated_inp
+        self.cnt += 1
         if self.cnt == self.num_steps:
-            self.cnt = 0           
+            self.cnt = 0
 
         if dist.is_initialized():
             dist.barrier()
@@ -392,7 +394,7 @@ def parallel_teacache_transformer(pipe):
                     self.offloader_single.wait_for_block(block_idx)
                     img = block(img, vec=vec, pe=pe)
                     self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
-            
+
             img = img[:, txt.shape[1] :, ...]
             self.previous_residual = img - ori_img
         # ---------------------- teacache ------------------------
